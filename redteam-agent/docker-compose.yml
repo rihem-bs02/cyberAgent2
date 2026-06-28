@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # Red Team Agent - Kali Edition
+  # ==========================================
+  redteam-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.kali
+    container_name: redteam-agent
+    hostname: kali-agent
+    environment:
+      # LLM
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL_HEAVY=${GROQ_MODEL_HEAVY:-llama-3.3-70b-versatile}
+      - GROQ_MODEL_FAST=${GROQ_MODEL_FAST:-qwen/qwen3-32b}
+      
+      # Qdrant
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_PATH=/app/qdrant_data
+      
+      # Neo4j
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASS=${NEO4J_PASS:-password}
+      
+      # Campaign
+      - SAFE_MODE=${SAFE_MODE:-false}  # Default false on Kali
+      - STEALTH_LEVEL=${STEALTH_LEVEL:-high}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REPORTS_DIR=/app/reports
+      - TARGET_ENV=${TARGET_ENV:-medflow}
+    volumes:
+      # Reports persistent
+      - ./reports:/app/reports
+      - ./logs:/app/logs
+      - ./qdrant_data:/app/qdrant_data
+      # Kali tools access
+      - /usr/share/wordlists:/usr/share/wordlists:ro
+      - ~/.msf4:/home/redteam/.msf4
+      - ~/.ssh:/home/redteam/.ssh:ro
+    networks:
+      - redteam-network
+    # Privileged mode for raw socket access (nmap, etc.)
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_PTRACE
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    command: ["tail", "-f", "/dev/null"]
+
+  # ==========================================
+  # Qdrant Vector Database
+  # ==========================================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: redteam-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+    networks:
+      - redteam-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================
+  # Neo4j Graph Database
+  # ==========================================
+  neo4j:
+    image: neo4j:5.20-enterprise
+    container_name: redteam-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - ./neo4j_data:/data
+      - ./neo4j_logs:/logs
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASS:-password}
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_server_memory_heap_initial__size=512m
+      - NEO4J_server_memory_heap_max__size=1g
+      - NEO4J_PLUGINS=["apoc"]
+    networks:
+      - redteam-network
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'RETURN 1' | cypher-shell -u ${NEO4J_USER:-neo4j} -p ${NEO4J_PASS:-password} || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+networks:
+  redteam-network:
+    name: redteam-network
+    driver: bridge
